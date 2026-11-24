@@ -1,147 +1,243 @@
-# DataFlow — Parallel Data Processing Engine
+<div align="center">
 
-DataFlow is a Java 17 / Spring Boot learning project for CSV ingestion, deterministic partitioning, parallel aggregation, asynchronous job execution, and job monitoring.
+# DataFlow
+### Bounded Parallel Data Processing Engine
 
-> **Scope:** DataFlow currently runs as a single application process with a local worker pool. It demonstrates parallel processing and bounded job admission; it is not a multi-node distributed cluster and does not yet persist job state across restarts.
+**A Java 17 / Spring Boot MapReduce-style engine for asynchronous, partitioned CSV analytics.**
 
-## Features
+[![Java CI](https://github.com/Krishanu26/Dataflow-distributed-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/Krishanu26/Dataflow-distributed-engine/actions/workflows/ci.yml)
+![Java](https://img.shields.io/badge/Java-17-orange?logo=openjdk)
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.4.2-6DB33F?logo=springboot)
+![Maven](https://img.shields.io/badge/build-Maven-C71A36?logo=apachemaven)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
-- Upload CSV files and select a column to aggregate.
-- Split records into balanced, immutable partitions.
-- Count values concurrently and merge partition-local results.
-- Submit jobs asynchronously and poll their lifecycle.
-- Use a dedicated, bounded application job executor rather than the common ForkJoinPool.
-- Reject overload with HTTP `503 Service Unavailable` and a `Retry-After` response header.
-- Enforce controlled job lifecycle transitions (`QUEUED → RUNNING → COMPLETED|FAILED`); queued work abandoned during forced shutdown is marked failed.
-- Retain up to 1,000 most recent completed or failed jobs; active jobs are never evicted.
-- Clean up temporary upload files after processing and when admission fails.
-- Drain submitted jobs during graceful shutdown and mark queued jobs that cannot start as failed.
-- Run automated unit tests and a GitHub Actions Java CI workflow.
+</div>
 
-## Architecture
+DataFlow accepts CSV processing jobs over a REST API, partitions datasets, runs partition-level aggregations concurrently, and combines partial results into deterministic output. It is designed around explicit resource bounds, backpressure, thread-safe job state transitions, and predictable overload behavior.
 
-```text
-HTTP client
-    |
-    v
-JobController --> JobService --> JobExecutionPool (bounded queue)
-                                      |
-                                      v
-                               ProcessingJob
-                                      |
-                                      v
-                              CsvDatasetReader
-                                      |
-                                      v
-                                Partitioner
-                                      |
-                                      v
-                         DataFlowEngine / worker pool
-                                      |
-                                      v
-                          Aggregation result + JobStore
-```
+> **Architecture scope:** DataFlow is currently a single-process parallel engine. It uses multiple local worker threads; it does not yet coordinate execution across machines or provide durable job storage.
 
-See [`docs/architecture.md`](docs/architecture.md) for component responsibilities, overload behavior, lifecycle rules, and current limitations.
+## What it demonstrates
 
-## Requirements
+- **Parallel MapReduce-style execution:** balanced data partitioning, partition-local aggregation, and deterministic reduction.
+- **Five aggregation operations:** **COUNT**, **SUM**, **AVG**, **MIN**, and **MAX**.
+- **Grouped analytics:** aggregate numeric columns by a categorical column, or across the entire dataset.
+- **Exact decimal arithmetic:** BigDecimal avoids binary floating-point rounding in financial-style CSV values.
+- **Two-level bounded concurrency:** a bounded application job executor and a separate bounded partition worker pool.
+- **Backpressure and overload control:** reject excess job submissions with HTTP 503 and Retry-After; partition producers wait for available queue capacity.
+- **Asynchronous job lifecycle:** QUEUED → RUNNING → COMPLETED | FAILED, with guarded transitions and status polling.
+- **Graceful shutdown:** drain accepted work, fail queued work that cannot start, and clean up temporary uploads.
+- **Bounded in-memory retention:** evict old terminal jobs without evicting queued or running jobs.
+- **Automated quality checks:** unit tests for algorithms and concurrency plus Spring MVC integration tests for the end-to-end job flow.
 
-- JDK 17 or later
-- Maven 3.9+
+## System architecture
+
+    REST clients
+         |
+         v
+    +---------------------+
+    |     JobController   |
+    +----------+----------+
+               |
+               v
+    +---------------------+
+    |      JobService     |
+    | validate / lifecycle|
+    +----------+----------+
+               |
+               v
+    +---------------------+
+    |   JobExecutionPool  |
+    | fixed workers       |
+    | bounded job queue   |
+    +----------+----------+
+               |
+               v
+    +---------------------+
+    |   CsvDatasetReader  |
+    +----------+----------+
+               |
+               v
+    +---------------------+
+    |     Partitioner     |
+    | balanced immutable  |
+    | partitions          |
+    +----------+----------+
+               |
+      submit partition tasks
+               |
+               v
+    +---------------------+
+    |    DataFlowEngine   |
+    | bounded worker pool |
+    +----------+----------+
+               |
+        +------+------+
+        |             |
+        v             v
+    Partition 1   Partition N
+    local reduce  local reduce
+        |             |
+        +------+------+
+               |
+               v
+       Merge partial results
+               |
+               v
+    +---------------------+
+    |  ProcessingResult   |
+    |     JobStore        |
+    +---------------------+
+
+See [Architecture](docs/architecture.md) and [Design Decisions](docs/design-decisions.md) for implementation details, failure semantics, and trade-offs.
+
+## Technology stack
+
+| Area | Technology |
+|---|---|
+| Language | Java 17 |
+| API and dependency injection | Spring Boot 3.4.2, Spring Web |
+| CSV parsing | Apache Commons CSV 1.13.0 |
+| Concurrency | ThreadPoolExecutor, ArrayBlockingQueue, CompletableFuture |
+| Numeric correctness | BigDecimal, MathContext.DECIMAL128 |
+| Build and tests | Maven, JUnit 5, Spring Boot Test, MockMvc |
+| CI | GitHub Actions |
 
 ## Run locally
 
-```bash
-cd backend
-mvn clean verify
-mvn spring-boot:run
-```
+**Requirements:** JDK 17+ and Maven 3.9+.
 
-The API starts at `http://localhost:8080`.
+    git clone https://github.com/Krishanu26/Dataflow-distributed-engine.git
+    cd Dataflow-distributed-engine/backend
+    mvn clean verify
+    mvn spring-boot:run
 
-## Configuration
-
-| Environment variable | Default | Purpose |
-|---|---:|---|
-| `DATAFLOW_JOB_WORKERS` | `4` | Number of concurrently executing submitted jobs |
-| `DATAFLOW_JOB_QUEUE_CAPACITY` | `32` | Maximum number of waiting jobs |
-| `DATAFLOW_JOB_TERMINAL_RETENTION_COUNT` | `1000` | Maximum number of completed or failed jobs retained in memory |
-| `DATAFLOW_ENGINE_WORKERS` | `8` (capped at 8) | Worker threads for partition-level aggregation |
-| `DATAFLOW_ENGINE_QUEUE_CAPACITY` | `512` | Maximum queued partition tasks; submitters experience backpressure when full |
-| `DATAFLOW_MAX_FILE_SIZE` | `20MB` | Maximum uploaded file size |
-| `DATAFLOW_MAX_REQUEST_SIZE` | `21MB` | Maximum multipart request size |
-
-The job queue capacity applies to waiting jobs; active jobs are in addition to the waiting queue. When all job workers and waiting slots are occupied, new submissions are rejected with `503` rather than accepted without a bound. The separate partition-task queue is also bounded; when it fills, job threads wait for capacity.
-
-## Try it
-
-From the repository root, in another terminal:
-
-```bash
-curl -X POST http://localhost:8080/api/jobs \
-  -F 'file=@sample-data/sales.csv' \
-  -F 'column=city' \
-  -F 'partitions=3'
-```
-
-The response contains a `jobId`. Poll it:
-
-```bash
-curl http://localhost:8080/api/jobs/JOB_ID_HERE
-```
-
-When the status is `COMPLETED`, retrieve the result:
-
-```bash
-curl http://localhost:8080/api/jobs/JOB_ID_HERE/result
-```
-
-Expected counts for the sample file: `Kolkata=3`, `Delhi=2`, `Mumbai=2`.
-
-List in-memory jobs:
-
-```bash
-curl http://localhost:8080/api/jobs
-```
+The API listens on http://localhost:8080.
 
 ## API
 
-| Method | Endpoint | Purpose |
+All processing jobs use multipart CSV uploads. Submission is asynchronous and returns HTTP 202 Accepted with a jobId.
+
+### 1. Count values
+
+This preserves the original behavior: count occurrences of each value in the selected column.
+
+    curl -X POST http://localhost:8080/api/jobs \
+      -F 'file=@../sample-data/sales.csv' \
+      -F 'column=city' \
+      -F 'partitions=3'
+
+### 2. Grouped numeric aggregation
+
+Calculate the sum of amount for each city:
+
+    curl -X POST http://localhost:8080/api/jobs \
+      -F 'file=@../sample-data/sales.csv' \
+      -F 'column=amount' \
+      -F 'operation=SUM' \
+      -F 'groupBy=city' \
+      -F 'partitions=4'
+
+Supported operations:
+
+| Operation | Behavior | Numeric column required |
 |---|---|---|
-| `POST` | `/api/jobs` | Submit multipart CSV job (`file`, `column`, optional `partitions`) |
-| `GET` | `/api/jobs` | List jobs known to this process |
-| `GET` | `/api/jobs/{id}` | Read job status |
-| `GET` | `/api/jobs/{id}/result` | Read successful result; returns `409` before completion |
+| COUNT | Count records per value; defaults to grouping by column | No |
+| SUM | Sum values per group | Yes |
+| AVG | Calculate arithmetic mean per group | Yes |
+| MIN | Find the minimum value per group | Yes |
+| MAX | Find the maximum value per group | Yes |
 
-A full job queue returns `503 Service Unavailable` with `Retry-After: 5`. Clients should retry with backoff rather than immediately resubmitting in a tight loop.
-When the terminal-job retention limit is reached, the oldest completed or failed jobs are removed first; queued and running jobs are not evicted. Job state remains process-local and is cleared on restart.
+For numeric operations, omit groupBy to aggregate the entire dataset into the ALL group. Numeric input is parsed as BigDecimal; blank or malformed values fail the job instead of being silently skipped.
 
-## Testing and CI
+### 3. Poll job status
 
-Run locally:
+    curl http://localhost:8080/api/jobs/JOB_ID
 
-```bash
-cd backend
-mvn clean verify
-```
+Possible states: QUEUED, RUNNING, COMPLETED, FAILED.
 
-GitHub Actions runs the Maven verification build on pushes and pull requests targeting `main` or `master`.
+### 4. Retrieve the result
 
-Current tests cover partition behavior, parallel aggregation, bounded executor saturation, forced-shutdown cleanup, terminal-job retention, and job lifecycle transitions. Integration tests for the full HTTP/database path and performance benchmarks are future work.
+    curl http://localhost:8080/api/jobs/JOB_ID/result
 
-## Known limitations and next steps
+The result includes the operation and selected columns, record count, partition count, execution duration, and either countsByValue or aggregatesByGroup.
 
-1. Job metadata and results are stored in memory and disappear when the process restarts.
-2. The CSV reader currently loads the complete dataset into memory; it is not a streaming ingestion implementation.
-3. Authentication, authorization, persistent storage, job cancellation, and durable retry scheduling are not implemented.
-4. Both the application-level job queue and per-partition task queue are bounded. Their defaults are conservative starting points and must be load-tested and tuned before production use.
-5. There is no multi-node coordination, message broker, or distributed scheduler.
-6. Add integration tests, benchmark workloads, and operational metrics before making performance or production-readiness claims.
+### 5. List known jobs
 
-## Engineering principles
+    curl http://localhost:8080/api/jobs
 
-- Prefer explicit resource limits to unbounded background work.
-- Make job state transitions predictable and thread-safe.
-- Keep failures observable without returning internal stack traces to API clients.
-- Test overload and failure paths, not only successful aggregation.
-- Document measured results; do not invent throughput or latency claims.
+### API reference
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | /api/jobs | Submit a CSV aggregation job |
+| GET | /api/jobs | List jobs retained by this process |
+| GET | /api/jobs/{id} | Retrieve job state and progress |
+| GET | /api/jobs/{id}/result | Retrieve the completed result; 409 until successful completion |
+
+When the application job queue is full, submission returns 503 Service Unavailable and Retry-After: 5. Clients should retry with exponential backoff.
+
+## Configuration
+
+All settings can be supplied as environment variables.
+
+| Environment variable | Default | Purpose |
+|---|---:|---|
+| DATAFLOW_JOB_WORKERS | 4 | Concurrent submitted jobs |
+| DATAFLOW_JOB_QUEUE_CAPACITY | 32 | Waiting job capacity |
+| DATAFLOW_JOB_TERMINAL_RETENTION_COUNT | 1000 | Maximum retained completed or failed jobs |
+| DATAFLOW_ENGINE_WORKERS | 8 | Partition worker threads; implementation caps this at 8 |
+| DATAFLOW_ENGINE_QUEUE_CAPACITY | 512 | Bounded partition task queue |
+| DATAFLOW_MAX_FILE_SIZE | 20MB | Maximum CSV upload size |
+| DATAFLOW_MAX_REQUEST_SIZE | 21MB | Maximum multipart request size |
+
+The job queue capacity is in addition to active job workers. The partition queue is independently bounded. When it is full, a submitting job thread waits for capacity rather than creating unbounded queued work.
+
+## Correctness and testing
+
+Run the full verification suite:
+
+    cd backend
+    mvn --batch-mode clean verify
+
+Coverage includes:
+- Balanced partitioning, empty input, and invalid partition counts.
+- Parallel count reduction and grouped SUM, AVG, MIN, and MAX.
+- Exact decimal aggregation and rejection of malformed numeric values.
+- Bounded executor saturation, forced-shutdown cleanup, and job lifecycle transitions.
+- End-to-end multipart submission, asynchronous polling, numeric result retrieval, and backward-compatible default COUNT behavior.
+
+GitHub Actions runs the Maven verification build on pushes and pull requests targeting the configured branches.
+
+## Complexity and resource model
+
+Let N be the number of CSV records, P the number of partitions, and G the number of distinct group keys.
+
+- Partitioning performs one pass over the record list: O(N + P) time.
+- Each aggregation scans every record once: O(N) total work, excluding map operations.
+- Partial aggregation state is proportional to the number of distinct groups: O(G) per active partition.
+- Reduction merges partition-local accumulators; the final output contains at most G entries.
+- Job admission and partition task queues are bounded to make queued work explicit.
+
+The CSV reader currently materializes all parsed records in memory. Therefore total memory usage is also O(N) for the input dataset, in addition to aggregation state. Streaming ingestion and explicit record-level memory budgets remain future work.
+
+## Current limitations
+
+- Single-process execution; no remote workers, distributed scheduler, or cross-node coordination.
+- Job metadata and results are in memory and are lost on process restart.
+- CSV parsing loads the complete file into memory.
+- No authentication, authorization, durable retries, or job cancellation.
+- No published throughput or latency claims; representative benchmarks and load tests are still needed before production sizing.
+
+## Roadmap
+
+1. Stream CSV records through bounded partition batches.
+2. Add durable job and result storage behind a repository abstraction.
+3. Add cancellation, retry policies, and recovery after process restart.
+4. Expose operational metrics for queue depth, active workers, job duration, failures, and records processed.
+5. Add reproducible benchmarks and load tests.
+6. Explore remote worker coordination only when a multi-node deployment requirement exists.
+
+## Engineering goals
+
+DataFlow prioritizes explicit resource limits, deterministic reduction, thread-safe state transitions, actionable failures, and testable concurrency behavior. Performance and production-readiness claims should be supported by reproducible measurements rather than assumptions.

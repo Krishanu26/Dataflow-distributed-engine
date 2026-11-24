@@ -1,37 +1,33 @@
-# DataFlow 3.0 upgrade notes
+# DataFlow upgrade notes
 
-This upgrade focuses on separation of processing responsibilities, bounded execution, lifecycle safety, and repeatable quality checks.
+## Parallel analytics upgrade
 
-## Implemented
+This change extends the original count-by-value engine into a grouped numeric analytics engine while preserving the default COUNT API.
 
-- Added `JobExecutionPool`, a dedicated fixed-size executor with a bounded waiting queue.
-- Replaced implicit `CompletableFuture.runAsync` submission in `JobService` with explicit executor submission.
-- Added overload handling: a full job queue is rejected, the unaccepted in-memory job is removed, and the temporary upload is deleted.
-- Added HTTP 503 + `Retry-After: 5` for job queue saturation.
-- Added synchronized `QUEUED → RUNNING → COMPLETED|FAILED` transitions to `ProcessingJob`, plus a queued-to-failed transition for work abandoned during forced shutdown.
-- Added bounded retention for terminal jobs; queued and running jobs are protected from eviction.
-- Added forced-shutdown handling for queued job cleanup and terminal state reporting.
-- Added a bounded partition-task queue to `DataFlowEngine`, applying backpressure to submitting job threads.
-- Added configurable executor sizes and multipart upload limits.
-- Added tests for queue saturation, invalid executor configuration, and job lifecycle transitions.
-- Added a GitHub Actions Maven verification workflow.
-- Expanded README and architecture documentation.
-- Expanded reliability tests for queue saturation, shutdown cleanup, terminal retention, and lifecycle transitions.
+### Implemented in this change
 
-## Not implemented in this upgrade
+- Added COUNT, SUM, AVG, MIN, and MAX aggregation operations.
+- Added optional group-by support and a global ALL group for numeric aggregation.
+- Added partition-local accumulators and a reduction stage.
+- Added BigDecimal arithmetic for exact decimal sums and comparisons; AVG uses DECIMAL128.
+- Added explicit failures for blank and malformed numeric values.
+- Extended processing results with operation, source column, grouping column, and numeric aggregates.
+- Preserved the original JobService submission overload and default COUNT behavior.
+- Added unit coverage for grouped aggregations, global aggregation, malformed input, and compatibility.
+- Added Spring MVC integration tests for multipart submission, asynchronous status polling, and result retrieval.
+- Reworked the README and architecture documentation and added design-decision notes.
 
-- PostgreSQL persistence or restart recovery.
-- Durable retries, cancellation, or dead-letter handling.
-- Streaming CSV ingestion (the reader still loads the dataset into memory).
-- Authentication/authorization.
-- End-to-end HTTP integration tests and load benchmarks.
-- Multi-node execution or distributed coordination.
+### Still not implemented
 
-## Verification
+- Multi-node execution, remote workers, or distributed coordination.
+- Durable job metadata, persistent result storage, or restart recovery.
+- Streaming CSV ingestion or record-level memory budgets.
+- Job cancellation, durable retries, or dead-letter handling.
+- Authentication and authorization.
+- Published benchmarks or production capacity claims.
 
-The project requires JDK 17+ and Maven 3.9+. Run:
+### Verification
 
-```bash
-cd backend
-mvn clean verify
-```
+Run from the backend directory:
+
+    mvn --batch-mode clean verify

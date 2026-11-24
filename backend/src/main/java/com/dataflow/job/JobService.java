@@ -1,5 +1,7 @@
 package com.dataflow.job;
 
+import com.dataflow.engine.AggregationOperation;
+import com.dataflow.engine.AggregationOutput;
 import com.dataflow.engine.CsvDatasetReader;
 import com.dataflow.engine.DataFlowEngine;
 import com.dataflow.model.ProcessingResult;
@@ -34,7 +36,20 @@ public class JobService {
     }
 
     public ProcessingJob submit(MultipartFile file, String column, int partitions) throws IOException {
+        return submit(file, column, partitions, "COUNT", null);
+    }
+
+    public ProcessingJob submit(MultipartFile file, String column, int partitions,
+                                String operationName, String groupBy) throws IOException {
         validate(file, column, partitions);
+        AggregationOperation operation = parseOperation(operationName);
+        String normalizedColumn = column.trim();
+        String normalizedGroupBy = groupBy == null || groupBy.isBlank() ? null : groupBy.trim();
+
+        // Preserve the original API contract: COUNT groups values in the selected column.
+        if (operation == AggregationOperation.COUNT && normalizedGroupBy == null) {
+            normalizedGroupBy = normalizedColumn;
+        }
 
         Path temp = Files.createTempFile("dataflow-", ".csv");
         try {
@@ -46,9 +61,10 @@ public class JobService {
 
         ProcessingJob job = new ProcessingJob(UUID.randomUUID().toString(), partitions);
         store.save(job);
+        String selectedGroupBy = normalizedGroupBy;
         try {
             executionPool.submit(
-                    () -> execute(job, temp, column, partitions),
+                    () -> execute(job, temp, normalizedColumn, selectedGroupBy, operation, partitions),
                     () -> {
                         job.failBeforeStart("Application shutdown prevented the job from starting");
                         deleteTemporaryFile(temp);
@@ -60,6 +76,17 @@ public class JobService {
             deleteTemporaryFile(temp);
             throw new JobQueueFullException(
                     "The processing queue is full. Please retry after a short delay.", rejected);
+        }
+    }
+
+    private AggregationOperation parseOperation(String operationName) {
+        if (operationName == null || operationName.isBlank()) {
+            throw new IllegalArgumentException("Operation is required");
+        }
+        try {
+            return AggregationOperation.valueOf(operationName.trim().toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException invalidOperation) {
+            throw new IllegalArgumentException("Unsupported operation. Use COUNT, SUM, AVG, MIN, or MAX");
         }
     }
 
@@ -79,7 +106,8 @@ public class JobService {
         }
     }
 
-    private void execute(ProcessingJob job, Path file, String column, int partitions) {
+    private void execute(ProcessingJob job, Path file, String column, String groupBy,
+                         AggregationOperation operation, int partitions) {
         long started = System.nanoTime();
         if (!job.markRunning()) {
             deleteTemporaryFile(file);
@@ -92,14 +120,27 @@ public class JobService {
                 throw new IllegalArgumentException(
                         "Column not found. Available columns: " + dataset.headers());
             }
+            if (groupBy != null && !dataset.headers().contains(groupBy)) {
+                throw new IllegalArgumentException(
+                        "Grouping column not found. Available columns: " + dataset.headers());
+            }
 
             job.addProcessed(dataset.rows().size());
-            var counts = engine.countByColumn(dataset.rows(), column, partitions);
+            AggregationOutput output = engine.aggregate(
+                    dataset.rows(), column, groupBy, operation, partitions);
             long elapsed = elapsedMillis(started);
             ProcessingResult result = new ProcessingResult(
-                    job.getId(), "COMPLETED", dataset.rows().size(),
+                    job.getId(),
+                    "COMPLETED",
+                    dataset.rows().size(),
                     Math.min(partitions, Math.max(1, dataset.rows().size())),
-                    elapsed, counts, Instant.now());
+                    elapsed,
+                    output.countsByGroup(),
+                    output.valuesByGroup(),
+                    operation.name(),
+                    column,
+                    groupBy,
+                    Instant.now());
             job.complete(result, elapsed);
         } catch (Exception exception) {
             job.fail(safeMessage(exception), elapsedMillis(started));
